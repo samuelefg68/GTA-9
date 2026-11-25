@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini GTA 3D</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud" class="hidden">
+    <div id="notifs"></div>
+
+    <div id="top-right">
+      <div id="minimap-wrap"><canvas id="minimap" width="240" height="240"></canvas></div>
+      <div id="cityname">Vice Brasília</div>
+      <div id="money">$ 0</div>
+      <div id="legend">
+        <span><i style="background:#2f8bff"></i>Você</span>
+        <span><i style="background:#ff3b3b"></i>NPCs</span>
+        <span><i style="background:#ffd32a"></i>Carros</span>
+        <span><i style="background:#8d939e"></i>Cidade</span>
+      </div>
+    </div>
+
+    <div id="prompt" class="hidden"></div>
+
+    <div id="speedo" class="hidden">
+      <div id="speed-value">0</div>
+      <div id="speed-unit">km/h</div>
+      <div id="speed-bar"><div id="speed-fill"></div></div>
+    </div>
+
+    <div id="altitude" class="hidden"></div>
+
+    <div id="help">E entrar/sair &nbsp; Shift correr &nbsp; Espaço pular/freio de mão &nbsp; Mouse/setas câmera &nbsp; P pausar</div>
+  </div>
+
+  <section id="screen-start" class="screen">
+    <div class="panel">
+      <h1>MINI<br>GTA 3D</h1>
+      <p class="tagline">Uma cidade aberta, uns carros e nenhum plano.</p>
+      <button id="btn-play" class="btn primary" disabled>Carregando…</button>
+      <button id="btn-gfx-start" class="btn" disabled>Gráficos: Normal</button>
+      <dl class="keys">
+        <dt>W A S D</dt><dd>Andar / acelerar, virar</dd>
+        <dt>Shift</dt><dd>Correr</dd>
+        <dt>Espaço</dt><dd>Pular (a pé) · freio de mão (no carro)</dd>
+        <dt>E</dt><dd>Entrar ou sair do veículo ou avião</dd>
+        <dt>No avião</dt><dd>W acelera · A/D inclina e vira · mouse sobe e desce</dd>
+        <dt>Mouse · setas</dt><dd>Girar a câmera · roda do mouse ajusta a distância</dd>
+        <dt>P · Esc</dt><dd>Pausar · F limita a 30 FPS</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section id="screen-pause" class="screen hidden">
+    <div class="panel small">
+      <h2>Pausado</h2>
+      <button id="btn-resume" class="btn primary">Continuar</button>
+      <button id="btn-gfx-pause" class="btn">Gráficos: Normal</button>
+      <button id="btn-restart" class="btn">Reiniciar</button>
+    </div>
+  </section>
+
+  <script type="module" src="scripts/main.js"></script>
+</body>
+</html>
