@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { damp, clamp, groundHeight, pick, angleDiff, mat } from './utils.js';
 
-const MODEL_COUNT = 4;
+const MODEL_COUNT = 3;
 const WHEEL = /wheel/i;
 const NOT_WHEEL = /steering|chrysler/i; // volante do interior ("steering" ou "Chrysler_Wheel" no .glb) não é roda
 const isWheel = (n) => WHEEL.test(n) && !NOT_WHEEL.test(n);
@@ -57,14 +57,13 @@ const PROXY_GEO = new THREE.BoxGeometry(1, 1, 1); // compartilhada: cada parte �
 //   keepAlpha mantém a transparência (BLEND) dos materiais, exceto vidros, que viram fumê escuro.
 // A escala automática age se o comprimento (eixo Z) estiver fora de 3-7 m: o modelo vai para TARGET_LEN.
 // carro1: ~4,65 m originais, frente em +z; scale 1,25 -> ~5,8 m. Materiais BLEND (cromados, detalhes) mantêm o alpha.
-// carro2 (10 m), carro3 (8,7 m) e carro4 (antigo carro5, ~50,9 unidades): a escala automática os leva a 4,6 m e o scale 1,25 os deixa em ~5,75 m, igual ao carro1.
+// carro2 (10 m) e carro3 (8,7 m): a escala automática os leva a 4,6 m e o scale 1,25 os deixa em ~5,75 m, igual ao carro1.
 const TARGET_LEN = 4.6;
-// maxSpeed em m/s: 100 km/h = 27,78; 70 km/h = 19,44; 75 km/h = 20,83; 60 km/h = 16,67.
+// maxSpeed em m/s: 100 km/h = 27,78; 70 km/h = 19,44; 75 km/h = 20,83.
 const MODEL_FIX = [
   { scale: 1.25, keepAlpha: true, maxSpeed: 27.78 }, // carro1: 100 km/h
   { scale: 1.25, maxSpeed: 19.44 },                // carro2: 70 km/h
   { scale: 1.25, maxSpeed: 20.83 },                // carro3: 75 km/h
-  { scale: 1.25, maxSpeed: 16.67 },                // carro4: 60 km/h
 ];
 
 // Cada roda vira: pivô (esterço em Y) > grupo de giro (eixo X) > nó da roda (mantém a rotação e a escala do arquivo).
