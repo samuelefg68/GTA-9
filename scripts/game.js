@@ -13,6 +13,7 @@ import { Weapons } from './weapons.js';
 import { Aircraft, AIR_VMAX } from './aviao.js';
 import { groundHeight } from './utils.js';
 import { Police } from './police.js';
+import { Weather } from './weather.js';
 
 export class Game {
   constructor() {
@@ -63,6 +64,7 @@ export class Game {
     this.weapons.police = this.police;
     this.cam = new ThirdPersonCamera(this.world.camera, this.physics);
     this.minimap = new Minimap($('minimap'), this.city);
+    this.weather = new Weather(this.world, this.notify);
     this._initPickups();
     this.resetState();
 
@@ -108,6 +110,7 @@ export class Game {
     this.weapons.reset();
     this.police.reset();
     this.aircraft.reset();
+    this.weather.reset();
     for (const k of this.pickups) this._place(k);
     this.cam.snap(this.player.heading);
     this.cam.idle = 0;
@@ -168,6 +171,7 @@ export class Game {
     if (this.state === 'playing') this.update(dt, t / 1000);
     else if (this.state === 'menu') this.updateMenu(dt);
     else if (this.state === 'lost') this.police.fadeLose(dt);
+    this.world.playerCar = this.player.vehicle || null;
     this.world.render();
 
     // Conta quadros realmente desenhados e atualiza o texto a cada 0,5 s
@@ -220,6 +224,7 @@ export class Game {
 
     const v = p.vehicle, ac = p.aircraft;
     this.cam.update(dt, p.pos, !!(v || ac), p.heading, v ? v.speed : (ac ? ac.speed : p.speed));
+    this.weather.update(dt, c);
     this.world.update(dt, p.pos);
     this.city.update(dt);
     this.minimap.draw(dt, p, this.cam.yaw, this.vehicles, this.npcs, this.pickups, this.aircraft);

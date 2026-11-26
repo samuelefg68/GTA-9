@@ -1,47 +1,60 @@
 import * as THREE from 'three';
-import { rand } from './utils.js';
-import { setCarShadows } from './vehicles.js';
+import { rand, lerp } from './utils.js';
+import { setCarShadows, setCarGraphics } from './vehicles.js';
+import { setCityGraphics } from './city.js';
+import { CarReflections } from './reflections.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 
 export const GRAPHICS = { NORMAL: 'normal', CINEMATIC: 'cinematic' };
 
-// Níveis de qualidade ajustados automaticamente pelo FPS (ver governQuality).
-// pr: resolução de render (limitada ao devicePixelRatio); shadow: tamanho do mapa de sombra.
+// Escada de qualidade (do mais barato ao mais caro). A resolução NUNCA fica abaixo do nativo
+// (pr 1): abaixo disso a imagem fica borrada. O regulador corta, nesta ordem: sombras maiores,
+// reflexo dinâmico do carro (cube) e bloom. O antialiasing é o FXAA, ligado em todos os níveis.
+// O Cinematográfico começa no nível CINE_START (tudo ligado, resolução nativa).
 const QUALITY = [
-  { pr: 0.75, shadow: 512 },   // baixo
-  { pr: 1, shadow: 1024 },     // médio
-  { pr: 1.75, shadow: 2048 },  // alto (padrão)
+  { pr: 1,    shadow: 512,  bloom: false, cube: false },
+  { pr: 1,    shadow: 1024, bloom: false, cube: false },
+  { pr: 1,    shadow: 1024, bloom: true,  cube: false },
+  { pr: 1,    shadow: 1024, bloom: true,  cube: true  },
+  { pr: 1.25, shadow: 1024, bloom: true,  cube: true  },
+  { pr: 1.75, shadow: 2048, bloom: true,  cube: true  },
 ];
+const CINE_START = 3;
+const FPS_MIN = 33;   // abaixo disto (média de 1 s) o regulador baixa a qualidade (Cinematográfico)
 
-// Diagnóstico: o composer (bloom + MSAA HalfFloat) fica desligado. Se o chão aparecer com ele desligado,
-// a causa estava no pós-processamento. Com false, o modo Cinematográfico usa o tone mapping do renderer direto.
-const USE_COMPOSER = false;
+// Cores do tempo fechado (chuva)
+const STORM = {
+  skyTop: new THREE.Color(0x3b444f), skyBottom: new THREE.Color(0x737d87),
+  cloud: new THREE.Color(0x5b636d), sun: new THREE.Color(0xaab4c0),
+  hemiSky: new THREE.Color(0x8591a0), hemiGround: new THREE.Color(0x3c403c),
+};
 
-// Diagnóstico do modo Cinematográfico via URL (ver setGraphics). Não afeta o modo Normal.
+const USE_COMPOSER = true;
 const DBG = new URLSearchParams(window.location.search);
 
-// Predefinições de gráficos. 'normal' é o padrão e reproduz o visual original.
-// 'cinematic' só troca valores (tone mapping, cores, intensidades, altura do sol e viés de sombra).
-// Não aumenta resolução de sombra, pixel ratio nem número de luzes, por isso não adiciona custo de GPU.
+// Alterando os presets do Cinematic para Dia Claro
 const PRESETS = {
   normal: {
     toneMapping: THREE.NoToneMapping, exposure: 1,
     sunDir: [80, 120, 60], sunColor: 0xfff1d6, sunIntensity: 2.1, bias: -0.0004, normalBias: 0.05,
-    hemiSky: 0xcfe6ff, hemiGround: 0x6b7a5a, hemiIntensity: 1.1,
+    hemiSky: 0xcfe6ff, hemiGround: 0x6b7a5a, hemiIntensity: 1.5,
     fog: 0xbcd9f2, skyTop: 0x3a78c9, skyBottom: 0xbcd9f2, fogNear: 140, fogFar: 620,
     envIntensity: 0, bloom: 0,
   },
-  // Sol baixo o bastante para dar contraluz, mas alto o bastante para que as sombras
-  // não cubram a rua inteira (com y=40 a rua ficava quase toda preta).
   cinematic: {
     toneMapping: THREE.ACESFilmicToneMapping, exposure: 1.25,
-    sunDir: [60, 75, 110], sunColor: 0xffa860, sunIntensity: 3.0, bias: -0.0004, normalBias: 0.05,
-    hemiSky: 0x8fb8ff, hemiGround: 0x5a4030, hemiIntensity: 0.7,
-    fog: 0xf0a070, skyTop: 0x1b3766, skyBottom: 0xffb27a, fogNear: 90, fogFar: 480,
-    envIntensity: 0, bloom: 0,
+    // Sol mais alto e cor neutra (dia)
+    sunDir: [40, 140, 70], sunColor: 0xfffaed, sunIntensity: 2.8, bias: -0.0004, normalBias: 0.05,
+    // Luz ambiente mais viva
+    hemiSky: 0x90b0d0, hemiGround: 0x5a6050, hemiIntensity: 1.3,
+    // Céu azul e névoa diurna
+    fog: 0xa8c5e0, skyTop: 0x1b5aab, skyBottom: 0x90c5ed, fogNear: 100, fogFar: 500,
+    envIntensity: 0, bloom: 0.25, // Bloom reduzido para dia
   },
 };
 
@@ -50,7 +63,7 @@ export class World {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.autoUpdate = false; // refeito só quando necessário (ver update)
+    this.renderer.shadowMap.autoUpdate = false;
     this._shadowKey = '';
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(this.renderer.domElement);
@@ -62,7 +75,6 @@ export class World {
     this.scene.fog = new THREE.Fog(0xbcd9f2, 140, 620);
     this.camera = new THREE.PerspectiveCamera(65, 1, 0.2, 1400);
 
-    // Iluminação: hemisférica (ambiente) + direcional (sol) com sombras que seguem o jogador.
     this.hemi = new THREE.HemisphereLight(0xcfe6ff, 0x6b7a5a, 1.1);
     this.scene.add(this.hemi);
     const sun = new THREE.DirectionalLight(0xfff1d6, 2.1);
@@ -75,14 +87,15 @@ export class World {
     this.scene.add(sun, sun.target);
     this.sun = sun;
 
-    // Céu em degradê (domo que acompanha a câmera).
     this.sky = new THREE.Mesh(
       new THREE.SphereGeometry(900, 24, 12),
       new THREE.ShaderMaterial({
         side: THREE.BackSide, depthWrite: false, fog: false,
         uniforms: { top: { value: new THREE.Color(0x3a78c9) }, bottom: { value: new THREE.Color(0xbcd9f2) } },
         vertexShader: 'varying float h; void main(){ h = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-        fragmentShader: 'uniform vec3 top; uniform vec3 bottom; varying float h; void main(){ gl_FragColor = vec4(mix(bottom, top, clamp(h * 1.4, 0.0, 1.0)), 1.0);\n#include <colorspace_fragment>\n}',
+fragmentShader: `uniform vec3 top; uniform vec3 bottom; varying float h; void main(){ gl_FragColor = vec4(mix(bottom, top, clamp(h * 1.4, 0.0, 1.0)), 1.0);
+#include <colorspace_fragment>
+}`,
       })
     );
     this.sky.renderOrder = -2;
@@ -91,9 +104,9 @@ export class World {
     this.sunDisc = new THREE.Mesh(new THREE.SphereGeometry(28, 16, 12), new THREE.MeshBasicMaterial({ color: 0xfff3b0, fog: false, toneMapped: false }));
     this.scene.add(this.sunDisc);
 
-    // Nuvens: elipsoides achatados compartilhando geometria e material.
     const cloudGeo = new THREE.SphereGeometry(1, 10, 8);
     const cloudMat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false, transparent: true, opacity: 0.92, toneMapped: false });
+    this.cloudMat = cloudMat;
     this.clouds = [];
     for (let i = 0; i < 14; i++) {
       const g = new THREE.Group();
@@ -108,69 +121,136 @@ export class World {
       this.clouds.push(g);
     }
 
-    // Luz de rebote: um céu em degradê pré-filtrado (PMREM), gerado uma única vez.
+    // PMREM (mapa de ambiente) refeito para Dia Claro!
     const pmrem = new THREE.PMREMGenerator(this.renderer);
+    pmrem.compileEquirectangularShader();
     const envScene = new THREE.Scene();
     envScene.add(new THREE.Mesh(
-      new THREE.SphereGeometry(10, 16, 8),
+      new THREE.SphereGeometry(10, 32, 16),
       new THREE.ShaderMaterial({
         side: THREE.BackSide,
-        uniforms: { top: { value: new THREE.Color(0x9ec8ff) }, horizon: { value: new THREE.Color(0xffc08a) }, ground: { value: new THREE.Color(0x3a2a20) } },
-        vertexShader: 'varying float h; void main(){ h = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-        fragmentShader: 'uniform vec3 top; uniform vec3 horizon; uniform vec3 ground; varying float h; void main(){ vec3 c = h > 0.0 ? mix(horizon, top, smoothstep(0.0, 0.6, h)) : mix(horizon, ground, smoothstep(0.0, -0.3, h)); gl_FragColor = vec4(c, 1.0); }',
+        uniforms: {
+          top: { value: new THREE.Color(0x1b5aab) }, // Azul céu vibrante
+          horizon: { value: new THREE.Color(0xa8c5e0) }, // Horizonte claro
+          ground: { value: new THREE.Color(0x404840) }, // Chão mais neutro
+          sunDir: { value: new THREE.Vector3(40, 140, 70).normalize() },
+        },
+        vertexShader: 'varying vec3 dir; void main(){ dir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+        fragmentShader: `
+          uniform vec3 top; uniform vec3 horizon; uniform vec3 ground; uniform vec3 sunDir;
+          varying vec3 dir;
+          void main(){
+            float h = dir.y;
+            vec3 c = h > 0.0
+              ? mix(horizon, top, smoothstep(0.0, 0.6, h))
+              : mix(horizon * 0.8, ground, smoothstep(0.0, -0.3, h));
+            float s = max(dot(normalize(dir), sunDir), 0.0);
+            // Sol claro, sem o tom laranjado do pôr do sol
+            c += vec3(1.0, 0.95, 0.85) * pow(s, 24.0) * 1.5;
+            c += vec3(1.0, 1.0, 0.9) * smoothstep(0.998, 1.0, s) * 5.0;
+            gl_FragColor = vec4(c, 1.0);
+          }
+        `,
       })
     ));
-    this.envTex = pmrem.fromScene(envScene, 0.02).texture;
+    this.envTex = pmrem.fromScene(envScene, 0.015).texture;
     pmrem.dispose();
 
-    // Pós-processamento (só no modo Cinematográfico): cena -> bloom -> tone mapping/sRGB.
-    // MSAA só com WebGL2; sem ele, o target HalfFloat funciona em mais GPUs/drivers.
     const size = this.renderer.getSize(new THREE.Vector2());
-    const msaa = this.renderer.capabilities.isWebGL2 ? 4 : 0;
-    const target = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, samples: msaa });
+    const target = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+      type: THREE.HalfFloatType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      samples: 0, // sem MSAA (caro): o antialiasing é o FXAA
+    });
     this.composer = new EffectComposer(this.renderer, target);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(size, 0, 0.55, 0.9);
+    this.bloom = new UnrealBloomPass(size, 0.25, 0.4, 0.92);
+    // Bloom em 1/4 da resolução (metade da padrão): o brilho é borrado de qualquer jeito
+    const bloomSetSize = this.bloom.setSize.bind(this.bloom);
+    this.bloom.setSize = (w, h) => bloomSetSize(Math.max(1, w >> 1), Math.max(1, h >> 1));
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
-    this.composerOk = true; // vira false se o pós-processamento falhar; aí renderiza direto
+    // FXAA depois do OutputPass (precisa da imagem já em sRGB); é o último passe e vai para a tela
+    this.fxaa = new ShaderPass(FXAAShader);
+    this.composer.addPass(this.fxaa);
+    this.composerOk = true;
+    this._envRainApplied = 0;
+
+    this.reflections = new CarReflections(this.renderer, this.scene);
+    this.playerCar = null; // carro dirigido pelo jogador (definido por game.js)
+
+    this.rain = 0;                // intensidade da chuva (definida por weather.js)
+    this.preRender = null;        // passada extra antes da cena (reflexo das poças)
+    this._base = null;            // predefinições em uso, sem o efeito da chuva
+    this._envRecords = new WeakMap();
+    this._envScale = 1;
+    this.sunDisc.material.transparent = true;
 
     this.setGraphics(GRAPHICS.NORMAL);
     this.resize();
     this.quality = QUALITY.length - 1;
-    this._qSlow = 0; this._qFast = 0;
+    this._qSlow = 0; this._qFast = 0; this._upNeed = 10; this._sinceUp = 99;
+    this._lastT = 0; this._accT = 0; this._accN = 0; // medição própria de FPS
     this._applyQuality();
     window.addEventListener('resize', () => this.resize());
   }
 
-  // Aplica o nível de qualidade atual (resolução de render e tamanho do mapa de sombra)
   _applyQuality() {
     const q = QUALITY[this.quality];
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.pr));
     this.sun.shadow.mapSize.set(q.shadow, q.shadow);
     if (this.sun.shadow.map) { this.sun.shadow.map.dispose(); this.sun.shadow.map = null; }
     this.renderer.shadowMap.needsUpdate = true;
+    this.bloom.enabled = q.bloom;
     this.resize();
   }
 
-  // Chamado pelo jogo com o FPS medido. Só baixa após ~1 s abaixo de 45 e só sobe após ~4 s acima de 58.
-  governQuality(fps) {
-    if (fps < 45) { this._qSlow++; this._qFast = 0; }
-    else if (fps > 58) { this._qFast++; this._qSlow = 0; }
-    else { this._qSlow = 0; this._qFast = 0; }
-    if (this._qSlow >= 2 && this.quality > 0) {
-      this.quality--; this._qSlow = 0; this._applyQuality();
-    } else if (this._qFast >= 8 && this.quality < QUALITY.length - 1) {
-      this.quality++; this._qFast = 0; this._applyQuality();
+  // O World mede o FPS sozinho (a cada ~1 s) e chama o regulador; governQuality() ficou
+  // só por compatibilidade com o game.js e não faz mais nada.
+  governQuality() {}
+
+  _measure() {
+    const now = performance.now();
+    if (this._lastT) {
+      const dt = now - this._lastT;
+      if (dt < 500) { this._accT += dt; this._accN++; } // ignora pausas/aba escondida
+    }
+    this._lastT = now;
+    if (this._accT >= 1000) {
+      this._govern(this._accN * 1000 / this._accT);
+      this._accT = 0; this._accN = 0;
     }
   }
 
-  // Aplica uma predefinição de gráficos. Não cria objetos novos: só ajusta valores existentes.
-  // Diagnóstico: ?use=tone,hemi,sun,fog,env faz o modo Cinematográfico usar os valores do Normal nesses grupos.
+  // Cinematográfico: baixa se a média ficar abaixo de FPS_MIN; Normal mira 45+.
+  _govern(fps) {
+    const cine = this.graphics === GRAPHICS.CINEMATIC;
+    const lo = cine ? FPS_MIN : 45, hi = cine ? 52 : 58;
+    this._sinceUp++;
+    if (fps < lo) {
+      this._qFast = 0;
+      if (this.quality > 0) {
+        // Subiu e logo caiu de novo: espera mais antes de tentar subir outra vez
+        if (this._sinceUp < 12) this._upNeed = Math.min(this._upNeed * 2, 60);
+        this.quality = Math.max(0, this.quality - (fps < 24 ? 2 : 1));
+        this._applyQuality();
+      }
+    } else if (fps > hi) {
+      if (++this._qFast >= this._upNeed && this.quality < QUALITY.length - 1) {
+        this.quality++; this._qFast = 0; this._sinceUp = 0; this._applyQuality();
+      }
+    } else {
+      this._qFast = 0;
+    }
+  }
+
   setGraphics(mode) {
     const p = PRESETS[mode];
     if (!p) return;
     this.graphics = mode;
+    this._setEnvScale(1); // devolve os reflexos ao normal antes de trocar materiais
+    this.reflections.release(); // antes de trocar os materiais dos carros
     const cine = mode === GRAPHICS.CINEMATIC;
     const use = new Set(DBG.get('use') ? DBG.get('use').split(',') : []);
     const g = (group) => (cine && use.has(group) ? PRESETS.normal : p);
@@ -202,11 +282,98 @@ export class World {
     this.renderer.shadowMap.needsUpdate = true;
     this._applyEnvironment(g('env').envIntensity);
 
-    // Carros projetam sombra só no Cinematográfico (eles entram no mapa de sombra)
-    setCarShadows(cine); // vehicles.js aplica no próximo quadro, só nos carros perto do jogador
+    setCityGraphics(cine, this.envTex);
+    setCarGraphics(cine, this.envTex);
+    setCarShadows(cine);
+    // O Cinematográfico começa num nível médio e o regulador sobe se der
+    if (cine && this.quality > CINE_START) {
+      this.quality = CINE_START; this._qSlow = 0; this._qFast = 0;
+      this._applyQuality();
+    }
+
+    this._base = { exposure: t.exposure, hemi: h, sun: s, fog: f, bloom: p.bloom };
+    this._applyWeather();
   }
 
-  // Liga a luz de rebote nos materiais Lambert já existentes (chamado só ao trocar de modo).
+  setRain(k) {
+    if (k === this.rain) return;
+    // Os materiais são percorridos em passos, não a cada quadro
+    const step = Math.abs(k - this._envRainApplied) > 0.02 || k === 0 || k === 1;
+    this.rain = k;
+    this._applyWeather(step);
+  }
+
+  // Mistura a predefinição atual com o tempo fechado.
+  // Normal: só céu, nuvens, sol e cor da neblina. Cinematográfico: também luzes e reflexos.
+  _applyWeather(updateEnv = true) {
+    const b = this._base;
+    if (!b) return;
+    const k = this.rain;
+    const lk = this.graphics === GRAPHICS.CINEMATIC ? k : 0;
+    const u = this.sky.material.uniforms;
+    u.top.value.setHex(b.fog.skyTop).lerp(STORM.skyTop, k);
+    u.bottom.value.setHex(b.fog.skyBottom).lerp(STORM.skyBottom, k);
+    this.scene.fog.color.setHex(b.fog.fog).lerp(STORM.skyBottom, k);
+    this.cloudMat.color.setHex(0xffffff).lerp(STORM.cloud, k);
+    this.sunDisc.material.opacity = 1 - k;
+    this.sunDisc.visible = k < 0.99;
+
+    this.scene.fog.near = lerp(b.fog.fogNear, 50, lk);
+    this.scene.fog.far = lerp(b.fog.fogFar, 340, lk);
+    this.renderer.toneMappingExposure = b.exposure * (1 - 0.12 * lk);
+    this.hemi.color.setHex(b.hemi.hemiSky).lerp(STORM.hemiSky, lk);
+    this.hemi.groundColor.setHex(b.hemi.hemiGround).lerp(STORM.hemiGround, lk);
+    this.hemi.intensity = b.hemi.hemiIntensity * (1 - 0.25 * lk);
+    this.sun.color.setHex(b.sun.sunColor).lerp(STORM.sun, lk);
+    this.sun.intensity = b.sun.sunIntensity * (1 - 0.8 * lk);
+    this.bloom.strength = b.bloom * (1 - 0.5 * lk);
+
+    if (updateEnv) {
+      this._envRainApplied = k;
+      this._setEnvScale(1 - 0.65 * lk);
+    }
+  }
+
+  // Escurece o reflexo estático (envTex) nos materiais PBR. O cubemap dinâmico
+  // do carro já captura o céu escuro, então ele mantém a intensidade original.
+  _setEnvScale(scale) {
+    if (scale === 1 && this._envScale === 1) return;
+    this._envScale = scale;
+    this.scene.traverse((o) => {
+      const m = o.material;
+      if (!m) return;
+      if (Array.isArray(m)) for (let i = 0; i < m.length; i++) this._scaleEnv(m[i], scale);
+      else this._scaleEnv(m, scale);
+    });
+  }
+
+  _scaleEnv(m, scale) {
+    if (!m.isMeshStandardMaterial) return; // inclui MeshPhysicalMaterial
+    let rec = this._envRecords.get(m);
+    if (!rec) {
+      if (m.envMap !== this.envTex) return;
+      rec = { base: m.envMapIntensity, applied: m.envMapIntensity };
+      this._envRecords.set(m, rec);
+    } else if (m.envMapIntensity !== rec.applied) {
+      rec.base = m.envMapIntensity; // outro código mudou o valor
+    }
+    rec.applied = m.envMap === this.envTex ? rec.base * scale : rec.base;
+    m.envMapIntensity = rec.applied;
+  }
+
+  _updateCarReflections() {
+    const r = this.reflections;
+    const car = this.graphics === GRAPHICS.CINEMATIC && QUALITY[this.quality].cube ? this.playerCar : null;
+    const swap = car !== r.car;
+    const scale = this._envScale;
+    // Ao trocar de carro, as cópias dos materiais precisam partir dos valores originais
+    if (swap) this._setEnvScale(1);
+    const wasLive = r.live;
+    r.update(car, this.envTex);
+    if (swap) this._setEnvScale(scale);
+    else if (r.live !== wasLive && scale !== 1) this._setEnvScale(scale);
+  }
+
   _applyEnvironment(intensity) {
     const env = intensity > 0 ? this.envTex : null;
     this.scene.traverse((o) => {
@@ -227,24 +394,23 @@ export class World {
     this.renderer.setSize(w, h);
     this.composer.setPixelRatio(this.renderer.getPixelRatio());
     this.composer.setSize(w, h);
+    const pr = this.renderer.getPixelRatio();
+    this.fxaa.material.uniforms['resolution'].value.set(1 / (w * pr), 1 / (h * pr));
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
 
   update(dt, focus) {
-    // A sombra acompanha o foco, "encaixada" em passos de 2 m para evitar tremulação.
     const d = this.sunDir;
     const fx = Math.round(focus.x / 2) * 2, fz = Math.round(focus.z / 2) * 2;
     this.sun.position.set(fx + d.x, d.y, fz + d.z);
     this.sun.target.position.set(fx, 0, fz);
     this.sun.target.updateMatrixWorld();
 
-    // Mapa de sombra só é refeito quando a posição encaixada muda (ou o modo de gráficos muda).
-    // Antes era refeito a cada quadro, redesenhando todos os prédios na luz do sol.
     const key = fx + ',' + fz;
-    // No Cinematográfico os carros se movem, então o mapa é refeito a cada quadro.
     this._frame = (this._frame || 0) + 1;
-    const cineRefresh = this.graphics === GRAPHICS.CINEMATIC && this._frame % 2 === 0;
+    const every = this.quality >= 4 ? 3 : 4; // sombras: renovação menos frequente
+    const cineRefresh = this.graphics === GRAPHICS.CINEMATIC && this._frame % every === 0;
     if (key !== this._shadowKey || cineRefresh) {
       this._shadowKey = key;
       this.renderer.shadowMap.needsUpdate = true;
@@ -260,12 +426,14 @@ export class World {
   }
 
   render() {
+    this._measure();
+    this._updateCarReflections();
+    if (this.preRender) this.preRender();
     if (USE_COMPOSER && this.graphics === GRAPHICS.CINEMATIC && this.composerOk) {
       try {
         this.composer.render();
         return;
       } catch (err) {
-        // Falha no pós-processamento: registra uma vez e volta ao render direto.
         this.composerOk = false;
         console.error('Pós-processamento desativado, usando render direto:', err);
       }

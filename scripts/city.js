@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { makeRng, blockCenter, mat, groundHeight, CITY } from './utils.js';
+import { createBuildings, setBuildingsGraphics } from './buildings.js';
 
 const { N, HALF } = CITY;
 
-// Acumula instâncias e cria um único InstancedMesh (poucas draw calls para objetos repetidos).
 class Batch {
   constructor(geo, material, cast = false, receive = false) {
     this.geo = geo; this.material = material; this.cast = cast; this.receive = receive; this.items = [];
@@ -35,51 +35,147 @@ class Batch {
   }
 }
 
-// ---------- Texturas de janelas (desenhadas em canvas, sem arquivos externos) ----------
-function makeBase(glass) {
-  const cv = document.createElement('canvas');
-  cv.width = cv.height = 64;
-  const g = cv.getContext('2d');
-  if (glass) {
-    g.fillStyle = '#a9c6e0'; g.fillRect(0, 0, 64, 64);
-    g.fillStyle = '#4d7396'; g.fillRect(3, 5, 58, 26);
-    g.fillStyle = '#6b93b8'; g.fillRect(3, 37, 58, 22);
-    g.fillStyle = '#e8eef4'; g.fillRect(0, 0, 64, 2); g.fillRect(0, 32, 64, 2);
-  } else {
-    g.fillStyle = '#e6e3dc'; g.fillRect(0, 0, 64, 64);
-    g.fillStyle = '#3b556f'; g.fillRect(14, 12, 36, 34);
-    g.fillStyle = '#5d7d9a'; g.fillRect(14, 12, 36, 8);
-    g.fillStyle = '#bdb8ac'; g.fillRect(11, 46, 42, 5);
+// ---------- Texturas Procedurais Aprimoradas ----------
+function makeAsphaltTex() {
+  const S = 512;
+  const cvMap = document.createElement('canvas');
+  const cvRough = document.createElement('canvas');
+  const cvBump = document.createElement('canvas');
+  cvMap.width = cvMap.height = cvRough.width = cvRough.height = cvBump.width = cvBump.height = S;
+
+  const gm = cvMap.getContext('2d');
+  const gr = cvRough.getContext('2d');
+  const gb = cvBump.getContext('2d');
+
+  // RNG com semente: o asfalto é igual a cada carregamento
+  const rnd = makeRng(7331);
+
+  // Fundo do asfalto
+  gm.fillStyle = '#2d3135'; gm.fillRect(0, 0, S, S);
+  gr.fillStyle = '#d8d8d8'; gr.fillRect(0, 0, S, S); // Fosco
+  gb.fillStyle = '#808080'; gb.fillRect(0, 0, S, S); // Bump neutro
+
+  // Desenha também do outro lado quando cruza a borda (textura sem emendas)
+  const tiled = (x, y, rad, draw) => {
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
+      const px = x + ox, py = y + oy;
+      if (px + rad >= 0 && px - rad <= S && py + rad >= 0 && py - rad <= S) draw(px, py);
+    }
+  };
+
+  // Manchas suaves de desgaste
+  for (let i = 0; i < 45; i++) {
+    const rad = 25 + rnd() * 65;
+    const tone = rnd() < 0.5 ? '0,0,0' : '150,155,160';
+    tiled(rnd() * S, rnd() * S, rad, (x, y) => {
+      const grad = gm.createRadialGradient(x, y, 0, x, y, rad);
+      grad.addColorStop(0, `rgba(${tone},0.07)`);
+      grad.addColorStop(1, `rgba(${tone},0)`);
+      gm.fillStyle = grad;
+      gm.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+    });
   }
-  const t = new THREE.CanvasTexture(cv);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.anisotropy = 4;
-  return t;
+
+  const gray = (v) => `rgb(${v | 0},${v | 0},${v | 0})`;
+  const dot = (g, x, y, rx, ry, ang) => {
+    g.beginPath(); g.ellipse(x, y, rx, ry, ang, 0, Math.PI * 2); g.fill();
+  };
+
+  // Granulação fina
+  for (let i = 0; i < 38000; i++) {
+    const x = (rnd() * S) | 0, y = (rnd() * S) | 0, light = rnd() < 0.35, sz = rnd() < 0.8 ? 1 : 2;
+    gm.fillStyle = light ? `rgba(190,190,185,${0.06 + rnd() * 0.14})` : `rgba(0,0,0,${0.1 + rnd() * 0.22})`;
+    gm.fillRect(x, y, sz, sz);
+    gb.fillStyle = gray(light ? 140 + rnd() * 30 : 90 + rnd() * 30);
+    gb.fillRect(x, y, sz, sz);
+  }
+
+  // Pedrinhas (brita) de tamanhos e tons variados
+  for (let i = 0; i < 2600; i++) {
+    const rx = 1 + rnd() * rnd() * 3, ry = rx * (0.6 + rnd() * 0.4), ang = rnd() * Math.PI;
+    const v = 55 + rnd() * 65, warm = rnd() * 8, height = 145 + rnd() * 45, rough = 165 + rnd() * 60;
+    tiled(rnd() * S, rnd() * S, rx + 1, (x, y) => {
+      gm.fillStyle = 'rgba(0,0,0,0.25)'; dot(gm, x + 0.7, y + 0.9, rx, ry, ang);
+      gm.fillStyle = `rgba(${(v + warm) | 0},${v | 0},${(v - warm * 0.5) | 0},0.75)`; dot(gm, x, y, rx, ry, ang);
+      gb.fillStyle = gray(height); dot(gb, x, y, rx, ry, ang);
+      gr.fillStyle = gray(rough); dot(gr, x, y, rx, ry, ang);
+    });
+  }
+
+  // Rachaduras finas e ramificadas
+  const line = (g, pts, ox, oy, style, width) => {
+    g.strokeStyle = style; g.lineWidth = width; g.lineCap = g.lineJoin = 'round';
+    g.beginPath();
+    pts.forEach(([x, y], i) => (i ? g.lineTo(x + ox, y + oy) : g.moveTo(x + ox, y + oy)));
+    g.stroke();
+  };
+  const crack = (x, y, ang, steps, width) => {
+    const pts = [[x, y]], branches = [];
+    for (let j = 0; j < steps; j++) {
+      ang += (rnd() - 0.5) * 0.9;
+      x += Math.cos(ang) * 9; y += Math.sin(ang) * 9;
+      pts.push([x, y]);
+      if (width > 0.9 && rnd() < 0.15) branches.push([x, y, ang + (rnd() < 0.5 ? -1 : 1) * (0.6 + rnd() * 0.6)]);
+    }
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
+      line(gm, pts, ox, oy, 'rgba(8,9,10,0.45)', width);
+      line(gb, pts, ox, oy, 'rgba(40,40,40,0.75)', width + 0.4);
+    }
+    for (const [bx, by, ba] of branches) crack(bx, by, ba, 3 + ((rnd() * 4) | 0), width * 0.6);
+  };
+  for (let i = 0; i < 4; i++) crack(rnd() * S, rnd() * S, rnd() * Math.PI * 2, 8 + ((rnd() * 10) | 0), 1.4);
+
+  const wrap = (cv, srgb) => {
+    const t = new THREE.CanvasTexture(cv);
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    t.repeat.set(120, 120); // Repetição no mapa
+    return t;
+  };
+  return { map: wrap(cvMap, true), rough: wrap(cvRough, false), bump: wrap(cvBump, false) };
 }
-const BASES = { false: null, true: null };
-const texCache = new Map();
-function windowTex(glass, rx, ry) {
-  const key = `${glass}_${rx}_${ry}`;
-  let t = texCache.get(key);
-  if (!t) {
-    if (!BASES[glass]) BASES[glass] = makeBase(glass);
-    t = BASES[glass].clone();
-    t.repeat.set(rx, ry);
-    t.needsUpdate = true;
-    texCache.set(key, t);
+
+let asphaltMatNormal = null;
+let asphaltMatCine = null;
+
+function getAsphaltMat(cine, envTex) {
+    if (!cine) {
+        if (!asphaltMatNormal) asphaltMatNormal = new THREE.MeshLambertMaterial({ color: 0x2f3338 });
+        return asphaltMatNormal;
+    }
+    if (!asphaltMatCine) {
+        const tex = makeAsphaltTex();
+        asphaltMatCine = new THREE.MeshStandardMaterial({
+            map: tex.map,
+            roughnessMap: tex.rough,
+            bumpMap: tex.bump,
+            bumpScale: 0.02,
+            color: 0xffffff,
+            roughness: 1.0,
+            metalness: 0.0, // Asfalto não é metal
+            envMap: envTex || null,
+            envMapIntensity: 0.3
+        });
+    } else if (envTex && asphaltMatCine.envMap !== envTex) {
+        asphaltMatCine.envMap = envTex;
+        asphaltMatCine.needsUpdate = true;
+    }
+    return asphaltMatCine;
+}
+
+
+let asphaltMesh = null; // referência para o asfalto (troca de material Normal/Cinematográfico)
+
+export function setCityGraphics(cine, envTex) {
+  setBuildingsGraphics(cine, envTex);
+  if (asphaltMesh) {
+    asphaltMesh.material = getAsphaltMat(cine, envTex);
   }
-  return t;
 }
 
 const CUBE = new THREE.BoxGeometry(1, 1, 1);
-const ROOF_GEO = new THREE.ConeGeometry(Math.SQRT1_2, 1, 4).rotateY(Math.PI / 4);
-const ROOF_MAT = mat(0x5a5e66);
 
-const PALETTE = [0xd9cfc1, 0xc7b9a6, 0xb8c4cf, 0xe0c9a6, 0xcfd6c2, 0xd8b4a0, 0xbfc3c9, 0xe8e0d0];
-const GLASS = [0xa9c6e0, 0x8fb0cc, 0x9fd0d8, 0xb8c4d8];
-const HOUSE = [0xf2e3c6, 0xe8c4a0, 0xc9d9c2, 0xd9d2e9, 0xf0d0d0];
-const ROOFS = [0x8a3b2c, 0x5c3a2a, 0x44505e, 0x7a4a2a];
 const AWN = [0xd64545, 0x2b8cd6, 0xe8a42b, 0x2eaa6a, 0xb04bd6];
 const TREE = [0x3f8a3a, 0x4b9a44, 0x2f7a3a, 0x5ca04a];
 
@@ -98,12 +194,14 @@ export function buildCity(scene, physics) {
     update: () => {},
     randomSidewalkPoint: null,
   };
+  const bld = createBuildings(scene, physics, info, rnd);
 
-  // Chão: grama infinita + asfalto sob a cidade.
   const grass = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000).rotateX(-Math.PI / 2), mat(0x5d9b4a));
   grass.position.y = -0.05; grass.receiveShadow = true; scene.add(grass);
-  const asphalt = new THREE.Mesh(new THREE.PlaneGeometry(2 * HALF + 60, 2 * HALF + 60).rotateX(-Math.PI / 2), mat(0x2f3338));
-  asphalt.receiveShadow = true; scene.add(asphalt);
+  
+  // Modificado: usa getAsphaltMat e armazena na global para atualização
+  asphaltMesh = new THREE.Mesh(new THREE.PlaneGeometry(2 * HALF + 60, 2 * HALF + 60).rotateX(-Math.PI / 2), getAsphaltMat(false, null));
+  asphaltMesh.receiveShadow = true; scene.add(asphaltMesh);
 
   const white = new THREE.MeshLambertMaterial({ color: 0xffffff });
   const box = new Batch(CUBE, white, false, true);
@@ -124,51 +222,16 @@ export function buildCity(scene, physics) {
     foliage.add(x, 3.4 * s, z, 0, 1.7 * s, 1.9 * s, 1.7 * s, choose(TREE));
     physics.add(x, z, 0.4 * s, 0.4 * s, 6);
   };
-  // Ponto na borda do quarteirão: e = 0 norte, 1 sul, 2 oeste, 3 leste.
   const edgePt = (cx, cz, e, along, off) =>
     e === 0 ? [cx + along, cz - off, 0, -1] : e === 1 ? [cx + along, cz + off, 0, 1] :
     e === 2 ? [cx - off, cz + along, -1, 0] : [cx + off, cz + along, 1, 0];
 
-  // ---------- Prédios ----------
-  function building(x, z, w, d, h, color, glass = false) {
-    const rx = Math.max(1, Math.round(d / 3.6)), rz = Math.max(1, Math.round(w / 3.6)), ry = Math.max(1, Math.round(h / 3.6));
-    const mx = new THREE.MeshLambertMaterial({ map: windowTex(glass, rx, ry), color });
-    const mz = new THREE.MeshLambertMaterial({ map: windowTex(glass, rz, ry), color });
-    const m = new THREE.Mesh(CUBE, [mx, mx, ROOF_MAT, ROOF_MAT, mz, mz]);
-    m.scale.set(w, h, d);
-    m.position.set(x, h / 2, z);
-    m.castShadow = m.receiveShadow = true;
-    m.updateMatrix(); m.matrixAutoUpdate = false;
-    scene.add(m);
-    physics.add(x, z, w / 2, d / 2, h);
-    info.buildings.push({ x, z, w, d });
-    return m;
-  }
-  function tower(x, z, w, d, h) {
-    const glass = rnd() < 0.5;
-    const col = glass ? choose(GLASS) : choose(PALETTE);
-    building(x, z, w, d, h, col, glass);
-    // coroamento escalonado (sem colisor extra: está dentro da mesma área)
-    const m = new THREE.Mesh(CUBE, ROOF_MAT);
-    m.scale.set(w * 0.5, h * 0.12, d * 0.5);
-    m.position.set(x, h + h * 0.06, z);
-    m.castShadow = true; m.updateMatrix(); m.matrixAutoUpdate = false;
-    scene.add(m);
-  }
-  function house(x, z, w, d, h) {
-    building(x, z, w, d, h, choose(HOUSE), false);
-    const roof = new THREE.Mesh(ROOF_GEO, mat(choose(ROOFS)));
-    roof.scale.set(w * 1.1, 2.8, d * 1.1);
-    roof.position.set(x, h + 1.4, z);
-    roof.castShadow = true; roof.updateMatrix(); roof.matrixAutoUpdate = false;
-    scene.add(roof);
-  }
+  // Loja: prédio de tijolo baixo (frente +z) com toldo colorido.
   function shop(x, z, w, d, h) {
-    building(x, z, w, d, h, choose(PALETTE), false);
-    box.add(x, 3.3, z + d / 2 + 1.0, 0, w * 0.9, 0.25, 2.2, choose(AWN));
+    const { W, D } = bld.brick(x, z, w, d, h, 0, 2);
+    box.add(x, 3.3, z + D / 2 + 1.0, 0, W * 0.9, 0.25, 2.2, choose(AWN));
   }
 
-  // ---------- Ruas: faixas centrais, faixas de pedestres, semáforos ----------
   for (let k = 0; k <= N; k++) {
     const c = -HALF + 80 * k;
     for (let s = -HALF + 4; s <= HALF - 4; s += 8) {
@@ -182,11 +245,9 @@ export function buildCity(scene, physics) {
     for (let b = 0; b <= N; b++) {
       const X = -HALF + 80 * a, Z = -HALF + 80 * b;
       for (const sgn of [-1, 1]) {
-        // travessias da rua horizontal (faixas alongadas em x) e da vertical (alongadas em z)
         if (Math.abs(X + sgn * 13) < HALF - 2) for (let o = -8; o <= 8; o += 1.6) box.add(X + sgn * 13, 0.03, Z + o, 0, 3.4, 0.04, 0.8, 0xf2f2f2);
         if (Math.abs(Z + sgn * 13) < HALF - 2) for (let o = -8; o <= 8; o += 1.6) box.add(X + o, 0.03, Z + sgn * 13, 0, 0.8, 0.04, 3.4, 0xf2f2f2);
       }
-      // semáforos nos cantos que têm calçada
       for (const sx of [-1, 1]) {
         for (const sz of [-1, 1]) {
           const px = X + sx * 11.5, pz = Z + sz * 11.5;
@@ -201,13 +262,12 @@ export function buildCity(scene, physics) {
     }
   }
 
-  // ---------- Quarteirões ----------
   const nodeGrid = [];
   for (let i = 0; i < N; i++) {
     nodeGrid[i] = [];
     for (let j = 0; j < N; j++) {
       const cx = blockCenter(i), cz = blockCenter(j);
-      const mid = N / 2; // centro da cidade: 2x2 quarteirões centrais (3..4 em 8x8)
+      const mid = N / 2;
       const downtown = i >= mid - 1 && i <= mid && j >= mid - 1 && j <= mid;
       box.add(cx, 0.125, cz, 0, 60, 0.25, 60, 0x9c9ea3);
 
@@ -219,21 +279,22 @@ export function buildCity(scene, physics) {
       box.add(cx, 0.26, cz, 0, 52, 0.02, 52, lot);
 
       if (type === 'tower') {
-        tower(cx, cz, r(26, 38), r(26, 38), downtown ? r(70, 120) : r(40, 80));
+        bld.tower(cx, cz, r(26, 38), r(26, 38), downtown ? r(70, 120) : r(40, 80), rnd() < 0.5 ? 0 : Math.PI);
       } else if (type === 'quad') {
         for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
           const x = cx + sx * 12.5, z = cz + sz * 12.5, w = r(15, 20), d = r(15, 20);
+          const ry = sz > 0 ? 0 : Math.PI; // frente voltada para a rua
           if (rnd() < 0.3) shop(x, z, w, d, r(6, 9));
-          else if (rnd() < 0.5) tower(x, z, w, d, downtown ? r(30, 65) : r(14, 40));
-          else building(x, z, w, d, downtown ? r(25, 50) : r(10, 28), choose(PALETTE));
+          else if (downtown || rnd() < 0.45) bld.tower(x, z, w, d, downtown ? r(30, 65) : r(14, 40), ry);
+          else bld.brick(x, z, w, d, r(10, 28), ry);
         }
       } else if (type === 'houses') {
         for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-          house(cx + sx * 12.5, cz + sz * 12.5, r(10, 14), r(10, 13), r(4.5, 6));
+          bld.modern(cx + sx * 12.5, cz + sz * 12.5, r(10, 14), r(10, 13), sz > 0 ? 0 : Math.PI);
         }
       } else if (type === 'park') {
-        box.add(cx, 0.28, cz, 0, 12, 0.02, 12, 0x3a7bd5);        // lago
-        box.add(cx, 0.275, cz, 0, 52, 0.02, 4, 0xcdb88a);        // trilhas
+        box.add(cx, 0.28, cz, 0, 12, 0.02, 12, 0x3a7bd5);
+        box.add(cx, 0.275, cz, 0, 52, 0.02, 4, 0xcdb88a);
         box.add(cx, 0.275, cz, 0, 4, 0.02, 52, 0xcdb88a);
         for (let t = 0; t < 16; t++) {
           const x = cx + r(-22, 22), z = cz + r(-22, 22);
@@ -256,7 +317,6 @@ export function buildCity(scene, physics) {
         }
       }
 
-      // Postes, árvores de calçada, placas
       for (let e = 0; e < 4; e++) {
         for (const al of [-16, 16]) {
           const [x, z] = edgePt(cx, cz, e, al, 29.3);
@@ -273,7 +333,6 @@ export function buildCity(scene, physics) {
         signs.add(x, 2.7, z, Math.atan2(nx, nz), 0.5, 0.5, 1, choose([0xd32f2f, 0x1565c0, 0xf9a825, 0x2e7d32]));
       }
 
-      // Grafo de calçadas (cantos do quarteirão) usado pela IA dos NPCs
       nodeGrid[i][j] = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sz]) => ({ x: cx + sx * 27, z: cz + sz * 27, n: [] }));
     }
   }
@@ -295,7 +354,6 @@ export function buildCity(scene, physics) {
     return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
   };
 
-  // Vagas de carros nas faixas das ruas (mão direita)
   for (let k = 1; k <= N - 1; k++) {
     const c = -HALF + 80 * k;
     for (let m = 0; m < N; m++) {
@@ -309,15 +367,9 @@ export function buildCity(scene, physics) {
     }
   }
 
-  // ---------- Grafo de ruas (tráfego dos carros) ----------
-  // Por cruzamento (a, b) e sentido h (mão direita: faixa a 5,5 m do eixo), há dois nós:
-  //  - chegada (exit = false): o carro entra no cruzamento no sentido h. Vai em frente ou começa uma curva.
-  //  - saída (exit = true): o carro já está na curva, com o novo sentido. Só segue em frente.
-  // Assim uma curva nunca vira outra curva no mesmo cruzamento (antes o carro girava em círculo).
-  // Curvas que saem do mapa não são criadas, então todo nó de chegada tem pelo menos uma saída.
   const ROAD_LANE = 5.5;
-  const ROAD_STEP = [[0, 1], [1, 0], [0, -1], [-1, 0]];       // próximo cruzamento por sentido h
-  const ROAD_HEAD = [0, Math.PI / 2, Math.PI, -Math.PI / 2];  // heading de cada sentido h
+  const ROAD_STEP = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+  const ROAD_HEAD = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
   const inGrid = (a, b) => a >= 0 && a <= N && b >= 0 && b <= N;
   const roadIdx = (a, b, h, exit) => ((a * (N + 1) + b) * 4 + h) * 2 + (exit ? 1 : 0);
   const roadNodes = [];
@@ -328,26 +380,25 @@ export function buildCity(scene, physics) {
   for (let a = 0; a <= N; a++) for (let b = 0; b <= N; b++) for (let h = 0; h < 4; h++) {
     const arr = roadNodes[roadIdx(a, b, h, false)];
     const ex = roadNodes[roadIdx(a, b, h, true)];
-    // em frente: vai ao cruzamento seguinte, já como chegada
     const fa = a + ROAD_STEP[h][0], fb = b + ROAD_STEP[h][1];
     if (inGrid(fa, fb)) arr.n.push(roadNodes[roadIdx(fa, fb, h, false)]);
-    // curvas à esquerda (h+1) e à direita (h+3): entram na saída do mesmo cruzamento
     for (const hh of [(h + 1) % 4, (h + 3) % 4]) {
       if (inGrid(a + ROAD_STEP[hh][0], b + ROAD_STEP[hh][1])) arr.n.push(roadNodes[roadIdx(a, b, hh, true)]);
     }
-    // saída de curva: segue em frente para o cruzamento seguinte
     if (inGrid(fa, fb)) ex.n.push(roadNodes[roadIdx(fa, fb, h, false)]);
   }
   info.roadNodes = roadNodes;
-  info.roadStarts = roadNodes.filter((n) => !n.exit); // onde os carros podem nascer ou reaparecer
+  info.roadStarts = roadNodes.filter((n) => !n.exit);
 
+  bld.build();
   box.build(scene); poles.build(scene); lampHeads.build(scene); foliage.build(scene);
-  signs.build(scene); housings.build(scene);
+  const signsMesh = signs.build(scene), housingsMesh = housings.build(scene);
   const lensMesh = lens.build(scene);
+  // Detalhes pequenos ficam fora do reflexo das poças (puddles.js)
+  for (const o of [signsMesh, housingsMesh, lensMesh]) if (o) o.userData.noReflect = true;
 
-  // Semáforos: ciclo de 12 s; os dois grupos ficam em fases opostas.
   let timer = 0, lastA = -1, lastB = -1;
-  const stateOf = (t) => (t < 5 ? 0 : t < 6 ? 1 : 2); // 0 verde, 1 amarelo, 2 vermelho
+  const stateOf = (t) => (t < 5 ? 0 : t < 6 ? 1 : 2);
   const col = new THREE.Color();
   info.update = (dt) => {
     timer += dt;
